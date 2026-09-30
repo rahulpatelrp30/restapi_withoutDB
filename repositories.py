@@ -1,55 +1,95 @@
+﻿from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
+from bson.decimal128 import Decimal128
+from pymongo import ReturnDocument
+
+from database import db as default_db
 from models import Account, Transaction, User
 
 
+def next_id(db, name: str) -> int:
+    """Gives 1, 2, 3... for each collection, like AUTO_INCREMENT in SQL."""
+    counter = db["counters"].find_one_and_update(
+        {"_id": name},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return counter["seq"]
+
+
 class UserRepository:
-    def __init__(self):
-        self._users: dict[int, User] = {}
-        self._next_id = 1
+    def __init__(self, db=None):
+        self.db = db if db is not None else default_db
+        self.col = self.db["users"]
+        self.col.create_index("email", unique=True)
+
+    def _to_user(self, doc) -> User:
+        return User(user_id=doc["_id"], name=doc["name"], email=doc["email"],
+                    created_at=doc["created_at"])
 
     def save(self, name: str, email: str) -> User:
-        user = User(user_id=self._next_id, name=name, email=email)
-        self._users[user.user_id] = user
-        self._next_id += 1
-        return user
+        doc = {"_id": next_id(self.db, "users"), "name": name, "email": email,
+               "created_at": datetime.now()}
+        self.col.insert_one(doc)
+        return self._to_user(doc)
 
     def find_by_id(self, user_id: int) -> Optional[User]:
-        return self._users.get(user_id)
+        doc = self.col.find_one({"_id": user_id})
+        return self._to_user(doc) if doc else None
 
     def find_by_email(self, email: str) -> Optional[User]:
-        return next((u for u in self._users.values() if u.email == email), None)
+        doc = self.col.find_one({"email": email})
+        return self._to_user(doc) if doc else None
 
 
 class AccountRepository:
-    def __init__(self):
-        self._accounts: dict[int, Account] = {}
-        self._next_id = 1
+    def __init__(self, db=None):
+        self.db = db if db is not None else default_db
+        self.col = self.db["accounts"]
+
+    def _to_account(self, doc) -> Account:
+        return Account(account_id=doc["_id"], user_id=doc["user_id"],
+                       account_type=doc["account_type"],
+                       balance=doc["balance"].to_decimal(),
+                       created_at=doc["created_at"])
 
     def save(self, user_id: int, account_type: str) -> Account:
-        account = Account(account_id=self._next_id, user_id=user_id, account_type=account_type)
-        self._accounts[account.account_id] = account
-        self._next_id += 1
-        return account
+        doc = {"_id": next_id(self.db, "accounts"), "user_id": user_id,
+               "account_type": account_type, "balance": Decimal128("0.00"),
+               "created_at": datetime.now()}
+        self.col.insert_one(doc)
+        return self._to_account(doc)
 
     def find_by_id(self, account_id: int) -> Optional[Account]:
-        return self._accounts.get(account_id)
+        doc = self.col.find_one({"_id": account_id})
+        return self._to_account(doc) if doc else None
 
     def update_balance(self, account_id: int, new_balance: Decimal) -> None:
-        self._accounts[account_id].balance = new_balance
+        self.col.update_one({"_id": account_id},
+                            {"$set": {"balance": Decimal128(str(new_balance))}})
 
 
 class TransactionRepository:
-    def __init__(self):
-        self._transactions: list[Transaction] = []
-        self._next_id = 1
+    def __init__(self, db=None):
+        self.db = db if db is not None else default_db
+        self.col = self.db["transactions"]
+        self.col.create_index("account_id")
+
+    def _to_txn(self, doc) -> Transaction:
+        return Transaction(txn_id=doc["_id"], account_id=doc["account_id"],
+                           txn_type=doc["txn_type"], amount=doc["amount"].to_decimal(),
+                           created_at=doc["created_at"])
 
     def save(self, account_id: int, txn_type: str, amount: Decimal) -> Transaction:
-        txn = Transaction(txn_id=self._next_id, account_id=account_id, txn_type=txn_type, amount=amount)
-        self._transactions.append(txn)
-        self._next_id += 1
-        return txn
+        doc = {"_id": next_id(self.db, "transactions"), "account_id": account_id,
+               "txn_type": txn_type, "amount": Decimal128(str(amount)),
+               "created_at": datetime.now()}
+        self.col.insert_one(doc)
+        return self._to_txn(doc)
 
     def find_by_account(self, account_id: int) -> list[Transaction]:
-        return [t for t in self._transactions if t.account_id == account_id]
+        docs = self.col.find({"account_id": account_id}).sort("_id", 1)
+        return [self._to_txn(d) for d in docs]
